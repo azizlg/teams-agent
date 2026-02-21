@@ -1,0 +1,43 @@
+# Environment & secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker volumes
+pgdata/
+redisdata/
+miniodata/
+audio-chunks/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+test_results.txt
+reports/*.pdf
+reports/*.docx
+
+# Zip packages (rebuilt from manifest/)
+meeting-agent-app.zip
+
+# Binary tools
+tools/

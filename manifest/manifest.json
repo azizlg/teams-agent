@@ -1,0 +1,77 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "1.0.0",
+  "id": "fec00466-c8a1-453d-9bc5-033b9212771b",
+  "developer": {
+    "name": "Meeting Agent",
+    "websiteUrl": "https://github.com/your-repo/intelligent-meeting-agent",
+    "privacyUrl": "https://github.com/your-repo/intelligent-meeting-agent/privacy",
+    "termsOfUseUrl": "https://github.com/your-repo/intelligent-meeting-agent/terms"
+  },
+  "name": {
+    "short": "Meeting Agent",
+    "full": "Intelligent Multilingual Meeting Agent"
+  },
+  "description": {
+    "short": "AI meeting transcription and analysis bot",
+    "full": "An intelligent bot that joins Teams meetings to provide real-time multilingual transcription, speaker identification, and AI-powered analysis reports. Supports 10+ languages including Arabic, French, and English."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#4F46E5",
+  "bots": [
+    {
+      "botId": "fec00466-c8a1-453d-9bc5-033b9212771b",
+      "scopes": [
+        "team",
+        "personal",
+        "groupChat"
+      ],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "commandLists": [
+        {
+          "scopes": [
+            "personal"
+          ],
+          "commands": [
+            {
+              "title": "status",
+              "description": "Show bot status and active meetings"
+            },
+            {
+              "title": "help",
+              "description": "Show help information"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": [],
+  "authorization": {
+    "permissions": {
+      "resourceSpecific": [
+        {
+          "name": "OnlineMeeting.ReadBasic.Chat",
+          "type": "Application"
+        },
+        {
+          "name": "OnlineMeetingTranscription.Read.Chat",
+          "type": "Application"
+        },
+        {
+          "name": "OnlineMeetingParticipant.Read.Chat",
+          "type": "Application"
+        }
+      ]
+    }
+  }
+}

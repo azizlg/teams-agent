@@ -1,0 +1,49 @@
+# ============================================================
+# Intelligent Multilingual Meeting Agent — Dependencies
+# ============================================================
+
+# --- Core Framework ---
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0
+pydantic-settings>=2.0
+
+# --- Bot Framework (Teams integration) ---
+botbuilder-core>=4.14.0
+botbuilder-schema>=4.14.0
+botframework-connector>=4.14.0
+
+# --- LLM (Groq — free tier) ---
+groq>=0.4.0
+
+# --- LangChain (tool framework) ---
+langchain-core>=0.1.0
+
+# --- Transcription (Whisper — local, free) ---
+faster-whisper>=0.10.0
+torch>=2.0.0
+
+# --- Speaker Diarization (pyannote — free with HuggingFace token) ---
+pyannote.audio>=3.0.0
+
+# --- Object Storage (MinIO — local, free) ---
+minio>=7.2.0
+
+# --- Database ---
+sqlalchemy[asyncio]>=2.0
+asyncpg>=0.29.0
+alembic>=1.13.0
+
+# --- Redis ---
+redis[hiredis]>=5.0.0
+
+# --- Reports ---
+python-docx>=1.0.0
+weasyprint>=60.0
+markdown>=3.5.0
+
+# --- Utilities ---
+python-dotenv>=1.0.0
+httpx>=0.25.0
+aiofiles>=23.0.0
+numpy>=1.24.0

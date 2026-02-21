@@ -1,0 +1,181 @@
+# ============================================================
+# Intelligent Multilingual Meeting Agent — Docker Compose
+# Services: app, whisper-worker, postgres, redis, minio, ngrok
+# ALL SERVICES FREE & LOCAL (except ngrok needs free account)
+# ============================================================
+
+version: "3.9"
+
+x-common-env: &common-env
+  env_file:
+    - .env
+
+services:
+  # --------------------------------------------------------
+  # Main FastAPI application
+  # --------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    <<: *common-env
+    ports:
+      - "8000:8000"
+    volumes:
+      - audio-chunks:/app/audio-chunks
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - meeting-agent
+
+  # --------------------------------------------------------
+  # Whisper transcription worker (separate process)
+  # --------------------------------------------------------
+  whisper-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    <<: *common-env
+    command: ["python", "-m", "transcription.whisper_worker"]
+    volumes:
+      - audio-chunks:/app/audio-chunks
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('healthy')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - meeting-agent
+
+  # --------------------------------------------------------
+  # PostgreSQL 15 with pgvector extension
+  # --------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg15
+    environment:
+      POSTGRES_USER: meeting_agent
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: meeting_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meeting_agent -d meeting_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - meeting-agent
+
+  # --------------------------------------------------------
+  # Redis 7 for audio chunk queue (Streams)
+  # --------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - meeting-agent
+
+  # --------------------------------------------------------
+  # MinIO — S3-compatible object storage (replaces Azure Blob)
+  # --------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Web console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - meeting-agent
+
+  # --------------------------------------------------------
+  # ngrok — Tunnel for Teams bot (local dev only)
+  # --------------------------------------------------------
+  ngrok:
+    image: ngrok/ngrok:latest
+    command: http app:8000 --log stdout
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    ports:
+      - "4040:4040"   # ngrok inspector UI
+    depends_on:
+      - app
+    restart: unless-stopped
+    networks:
+      - meeting-agent
+
+# --------------------------------------------------------
+# Volumes
+# --------------------------------------------------------
+volumes:
+  pgdata:
+    driver: local
+  redisdata:
+    driver: local
+  miniodata:
+    driver: local
+  audio-chunks:
+    driver: local
+
+# --------------------------------------------------------
+# Networks
+# --------------------------------------------------------
+networks:
+  meeting-agent:
+    driver: bridge
