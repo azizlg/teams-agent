@@ -95,6 +95,7 @@ class AppState:
         self.blob_storage = None
         self.db_engine = None
         self.speech_client = None
+        self.graph_client = None  # GraphCallsClient for joining meetings
         self.active_meetings: dict[str, dict[str, Any]] = {}
 
     async def startup(self) -> None:
@@ -123,6 +124,14 @@ class AppState:
         except Exception:
             logger.exception("✗ Database engine creation failed")
 
+        # Graph Communications client (for joining meeting calls)
+        try:
+            from bot.graph_calls import GraphCallsClient
+            self.graph_client = GraphCallsClient()
+            logger.info("✓ Graph Communications client created")
+        except Exception:
+            logger.exception("✗ Graph Communications client init failed")
+
         logger.info("Application startup complete")
 
     async def shutdown(self) -> None:
@@ -138,6 +147,14 @@ class AppState:
                     logger.info("Flushed audio buffer for meeting %s", meeting_id)
                 except Exception:
                     logger.exception("Error flushing meeting %s", meeting_id)
+
+        # Close Graph client
+        if self.graph_client:
+            try:
+                await self.graph_client.close()
+                logger.info("✓ Graph client closed")
+            except Exception:
+                logger.exception("Error closing Graph client")
 
         # Close Redis
         if self.redis_queue:
@@ -177,6 +194,27 @@ async def lifespan(app: FastAPI):
     )
 
     await app_state.startup()
+
+    # Set tunnel URL for Graph callbacks (env var first, then auto-detect)
+    if app_state.graph_client:
+        import os as _os
+        _tunnel_url = _os.environ.get("TUNNEL_URL", "").strip().rstrip("/")
+        if _tunnel_url:
+            app_state.graph_client.set_callback_url(_tunnel_url)
+            logger.info("Using configured TUNNEL_URL for Graph callbacks: %s", _tunnel_url)
+        else:
+            try:
+                import httpx as _httpx
+                async with _httpx.AsyncClient() as _c:
+                    _r = await _c.get("http://127.0.0.1:20242/quicktunnel", timeout=3)
+                    if _r.status_code == 200:
+                        _host = _r.json().get("hostname", "")
+                        if _host:
+                            app_state.graph_client.set_callback_url(f"https://{_host}")
+                            logger.info("Auto-detected tunnel for Graph callbacks: https://%s", _host)
+            except Exception:
+                logger.info("No cloudflared tunnel detected — set Graph callback URL manually if needed")
+
     yield
     await app_state.shutdown()
 
@@ -220,13 +258,50 @@ async def health_check() -> HealthResponse:
 # Meeting endpoints
 # ---------------------------------------------------------------------------
 
+@app.post("/meetings/demo", tags=["meetings"])
+async def create_demo_meeting(meeting_id: str = "demo001") -> dict:
+    """
+    Create a mock meeting with pre-loaded transcript data for testing.
+    Bypasses the audio pipeline — no model loading required.
+    """
+    import time
+
+    if meeting_id in app_state.active_meetings:
+        del app_state.active_meetings[meeting_id]  # reset if exists
+
+    now = time.time()
+    app_state.active_meetings[meeting_id] = {
+        "status": MeetingStatus.ACTIVE,
+        "audio_handler": None,
+        "speech_client": None,
+        "chunk_manager": None,
+        "meeting_url": "https://teams.microsoft.com/demo",
+        "transcript_segments": [
+            {"text": "Bonjour tout le monde, commençons la réunion.", "language": "fr", "timestamp": now - 300, "confidence": 0.97, "speaker_id": "Speaker_1", "source": "whisper"},
+            {"text": "Good morning everyone, let's start the meeting.", "language": "en", "timestamp": now - 290, "confidence": 0.98, "speaker_id": "Speaker_2", "source": "whisper"},
+            {"text": "مرحباً، هل يمكننا مراجعة تقرير المبيعات؟", "language": "ar", "timestamp": now - 280, "confidence": 0.95, "speaker_id": "Speaker_3", "source": "whisper"},
+            {"text": "The Q4 results show a 15% increase in revenue compared to last quarter.", "language": "en", "timestamp": now - 270, "confidence": 0.99, "speaker_id": "Speaker_2", "source": "whisper"},
+            {"text": "Excellent, nous devons maintenant discuter du budget pour le prochain trimestre.", "language": "fr", "timestamp": now - 260, "confidence": 0.96, "speaker_id": "Speaker_1", "source": "whisper"},
+            {"text": "I agree, the AI transcription feature has been very helpful for our team.", "language": "en", "timestamp": now - 250, "confidence": 0.98, "speaker_id": "Speaker_2", "source": "whisper"},
+            {"text": "شكراً جزيلاً، سنتابع هذه النقاط في الاجتماع القادم.", "language": "ar", "timestamp": now - 240, "confidence": 0.94, "speaker_id": "Speaker_3", "source": "whisper"},
+            {"text": "Let's schedule a follow-up meeting for next week.", "language": "en", "timestamp": now - 230, "confidence": 0.99, "speaker_id": "Speaker_2", "source": "whisper"},
+        ],
+    }
+    return {
+        "meeting_id": meeting_id,
+        "status": "demo_active",
+        "message": f"Demo meeting '{meeting_id}' created with {len(app_state.active_meetings[meeting_id]['transcript_segments'])} mock transcript segments (EN/FR/AR)",
+    }
+
+
 @app.post("/meetings/join", tags=["meetings"])
 async def join_meeting(request: MeetingJoinRequest) -> dict[str, str]:
     """
     Trigger the bot to join a specific Teams meeting.
 
-    Initialises the AudioStreamHandler, AzureSpeechClient, and ChunkManager,
-    then instructs the Teams bot to join the meeting.
+    1. Initialises the audio pipeline (AudioStreamHandler + Whisper + ChunkManager)
+    2. Calls the Microsoft Graph Communications API to join the meeting call
+    3. Audio will arrive via Graph media callbacks once the call is established
     """
     import uuid
 
@@ -240,53 +315,67 @@ async def join_meeting(request: MeetingJoinRequest) -> dict[str, str]:
 
     logger.info("Joining meeting %s — url=%s", meeting_id, request.meeting_url)
 
-    # Initialise pipeline components
+    # Step 1: Start the MeetingHandler pipeline
     try:
-        from bot.audio_stream import AudioStreamHandler
-        from transcription.whisper_realtime import WhisperRealtimeTranscriber
-        from transcription.chunk_manager import ChunkManager
-
-        # Create components
-        speech_client = WhisperRealtimeTranscriber() if request.enable_transcription else None
-        chunk_manager = ChunkManager(
+        session = await _meeting_handler.on_meeting_start(
             meeting_id=meeting_id,
-            blob_uploader=app_state.blob_storage,
-            queue_publisher=app_state.redis_queue,
-        ) if request.enable_whisper else None
-
-        audio_handler = AudioStreamHandler(
-            speech_client=speech_client,
-            chunk_manager=chunk_manager,
+            meeting_data={"meeting_url": request.meeting_url},
         )
 
-        # Start the pipeline
-        if speech_client:
-            await speech_client.start()
-        await audio_handler.start()
-
-        # Store in active meetings
+        # Bridge to app_state so transcript/status endpoints work
         app_state.active_meetings[meeting_id] = {
             "status": MeetingStatus.ACTIVE,
-            "audio_handler": audio_handler,
-            "speech_client": speech_client,
-            "chunk_manager": chunk_manager,
+            "audio_handler": session.audio_handler,
+            "speech_client": session.speech_client,
+            "chunk_manager": session.chunk_manager,
             "meeting_url": request.meeting_url,
-            "transcript_segments": [],
+            "transcript_segments": session.transcript_segments,  # shared ref
+            "session": session,
         }
 
-        logger.info("Meeting %s pipeline initialised and active", meeting_id)
+        logger.info("Meeting %s pipeline initialised", meeting_id)
 
     except Exception as e:
-        logger.exception("Failed to join meeting %s", meeting_id)
+        logger.exception("Failed to initialise pipeline for %s", meeting_id)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to initialise meeting pipeline: {e}",
+            detail=f"Pipeline init failed: {e}",
+        )
+
+    # Step 2: Join via Graph Communications API
+    call_session = None
+    if app_state.graph_client and app_state.graph_client._callback_url:
+        try:
+            call_session = await app_state.graph_client.join_meeting(
+                join_url=request.meeting_url,
+                meeting_id=meeting_id,
+            )
+            app_state.active_meetings[meeting_id]["call_session"] = call_session
+            logger.info(
+                "Graph call created: call_id=%s for meeting %s",
+                call_session.call_id,
+                meeting_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "Graph call join failed (pipeline still active): %s", e
+            )
+    else:
+        logger.info(
+            "Graph client not configured or no callback URL — "
+            "pipeline running but bot won't join the call automatically. "
+            "Meeting events from Teams will still trigger transcription."
         )
 
     return {
         "meeting_id": meeting_id,
-        "status": "joined",
-        "message": f"Bot is joining meeting {meeting_id}",
+        "status": "joined" if call_session else "pipeline_ready",
+        "message": (
+            f"Bot joined meeting call (call_id={call_session.call_id})"
+            if call_session
+            else f"Pipeline ready for meeting {meeting_id}. "
+            f"Bot will transcribe when meeting events arrive via Teams."
+        ),
     }
 
 
@@ -328,7 +417,13 @@ async def get_meeting_transcript(meeting_id: str) -> TranscriptResponse:
     if not meeting:
         raise HTTPException(status_code=404, detail=f"Meeting {meeting_id} not found")
 
-    segments = meeting.get("transcript_segments", [])
+    # Try MeetingHandler session first (live data), fall back to dict
+    session = meeting.get("session")
+    if session:
+        segments = session.transcript_segments  # live reference
+    else:
+        segments = meeting.get("transcript_segments", [])
+
     languages = list({s.get("language", "unknown") for s in segments})
 
     return TranscriptResponse(
@@ -349,6 +444,64 @@ async def get_meeting_transcript(meeting_id: str) -> TranscriptResponse:
     )
 
 
+@app.post("/meetings/{meeting_id}/leave", tags=["meetings"])
+async def leave_meeting(meeting_id: str) -> dict[str, str]:
+    """Leave an active meeting — stop the pipeline and hang up the call."""
+    meeting = app_state.active_meetings.get(meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail=f"Meeting {meeting_id} not found")
+
+    # Stop pipeline via MeetingHandler
+    await _meeting_handler.on_meeting_end(meeting_id=meeting_id, meeting_data={})
+
+    # Hang up Graph call if active
+    call_session = meeting.get("call_session")
+    if call_session and app_state.graph_client:
+        try:
+            await app_state.graph_client.leave_meeting(call_session.call_id)
+        except Exception:
+            logger.exception("Error leaving Graph call %s", call_session.call_id)
+
+    # Keep the meeting data for transcript access, mark as ended
+    meeting["status"] = MeetingStatus.ENDED
+
+    return {"meeting_id": meeting_id, "status": "left"}
+
+
+# ---------------------------------------------------------------------------
+# Graph Communications callback (receives call state + audio)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/calls/callback", tags=["webhook"])
+async def graph_calls_callback(request: Request) -> Response:
+    """
+    Handle callbacks from Microsoft Graph Communications API.
+
+    Graph sends notifications here when:
+    - Call state changes (establishing → established → terminated)
+    - Audio data arrives (app-hosted media)
+    - Participants join/leave the call
+    """
+    try:
+        body = await request.json()
+        logger.info("Graph calls callback received: %s", str(body)[:200])
+
+        if app_state.graph_client:
+            result = await app_state.graph_client.handle_callback(body)
+            return Response(
+                content='{"status":"ok"}',
+                status_code=200,
+                media_type="application/json",
+            )
+        else:
+            logger.warning("Graph callback received but no graph_client configured")
+            return Response(status_code=200)
+
+    except Exception as e:
+        logger.exception("Graph calls callback error: %s", e)
+        return Response(status_code=200)
+
+
 # ---------------------------------------------------------------------------
 # Bot Framework SDK adapter (handles OAuth + reply routing automatically)
 # ---------------------------------------------------------------------------
@@ -365,26 +518,62 @@ _BOT_APP_PASSWORD = _os.getenv("MICROSOFT_APP_PASSWORD", "")
 _BOT_TENANT_ID = _os.getenv("MICROSOFT_APP_TENANT_ID", "")
 logger.info("Bot credentials loaded: app_id=%s tenant=%s", _BOT_APP_ID[:8] + "..." if _BOT_APP_ID else "EMPTY", _BOT_TENANT_ID[:8] + "..." if _BOT_TENANT_ID else "EMPTY")
 
+_is_dev = _os.getenv("ENVIRONMENT", "development") == "development"
+
+# Always use REAL credentials for the adapter so that outgoing replies
+# (send_activity) can authenticate to Azure Bot Service / Bot Connector.
+# Incoming JWT validation is handled separately in the endpoint.
 _adapter_settings = BotFrameworkAdapterSettings(
     app_id=_BOT_APP_ID,
     app_password=_BOT_APP_PASSWORD,
-    channel_auth_tenant=_BOT_TENANT_ID,
+    # Must specify tenant for single-tenant app registrations so the
+    # SDK fetches tokens from the correct Azure AD endpoint.
+    channel_auth_tenant=_BOT_TENANT_ID or None,
+    auth_configuration=None,
 )
 _adapter = BotFrameworkAdapter(_adapter_settings)
+
+# Emulator adapter: NO credentials.  Single-tenant apps can't authenticate
+# via botframework.com, and the emulator (configured without App ID/Password)
+# does not require auth on either incoming activities or outgoing replies.
+_emu_adapter_settings = BotFrameworkAdapterSettings(
+    app_id="",
+    app_password="",
+    channel_auth_tenant=None,
+    auth_configuration=None,
+)
+_emu_adapter = BotFrameworkAdapter(_emu_adapter_settings)
 
 # Error handler — log errors so they are visible
 async def _on_adapter_error(context: TurnContext, error: Exception):
     logger.exception("Bot adapter error: %s", error)
     try:
-        await context.send_activity("Sorry, an internal error occurred.")
+        import asyncio
+        await asyncio.wait_for(
+            context.send_activity("Sorry, an internal error occurred."),
+            timeout=3.0,
+        )
     except Exception:
         pass
 
 _adapter.on_turn_error = _on_adapter_error
+_emu_adapter.on_turn_error = _on_adapter_error
 
-# Instantiate the bot (uses TeamsBot from bot/teams_bot.py)
+# Instantiate the MeetingHandler + TeamsBot with the handler wired in
+from bot.meeting_handler import MeetingHandler
 from bot.teams_bot import TeamsBot
-_bot = TeamsBot()
+
+_meeting_handler = MeetingHandler(
+    blob_uploader=app_state.blob_storage,
+    queue_publisher=app_state.redis_queue,
+)
+
+_bot = TeamsBot(
+    meeting_handler=_meeting_handler,
+    graph_client=app_state.graph_client,
+    app_state=app_state,
+)
+logger.info("TeamsBot wired with MeetingHandler + GraphClient — bot will auto-join meetings")
 
 
 # ---------------------------------------------------------------------------
@@ -403,11 +592,32 @@ async def bot_messages(request: Request) -> Response:
         body = await request.json()
         activity = Activity().deserialize(body)
         auth_header = request.headers.get("Authorization", "")
-        logger.info("Bot activity received: type=%s channel=%s", activity.type, activity.channel_id)
-
-        response = await _adapter.process_activity(
-            activity, auth_header, _bot.on_turn
+        channel = (activity.channel_id or "").lower()
+        logger.info(
+            "Bot activity received: type=%s channel=%s from=%s serviceUrl=%s",
+            activity.type, channel,
+            getattr(activity.from_property, 'id', '?') if activity.from_property else '?',
+            activity.service_url,
         )
+
+        if channel == "emulator":
+            # Emulator: use zero-credential adapter + blank auth so the SDK
+            # skips JWT validation.  Outgoing replies go unauthenticated,
+            # which the emulator (configured without App ID) accepts.
+            logger.info("Using emulator adapter (no creds, no auth)")
+            response = await _emu_adapter.process_activity(
+                activity, "", _bot.on_turn
+            )
+        else:
+            # Azure channels (webchat, msteams, etc.): use the real-
+            # credential adapter and pass through the actual auth header
+            # so the SDK can validate the incoming JWT and authenticate
+            # outgoing replies.
+            response = await _adapter.process_activity(
+                activity, auth_header, _bot.on_turn
+            )
+        status = response.status if response else 201
+        logger.info("Bot activity processed OK, returning HTTP %d", status)
         if response:
             return Response(
                 content=response.body,

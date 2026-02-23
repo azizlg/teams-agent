@@ -1,21 +1,22 @@
 {
   "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
   "manifestVersion": "1.16",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "id": "fec00466-c8a1-453d-9bc5-033b9212771b",
+  "packageName": "com.capgemini.meetingagent",
   "developer": {
-    "name": "Meeting Agent",
-    "websiteUrl": "https://github.com/your-repo/intelligent-meeting-agent",
-    "privacyUrl": "https://github.com/your-repo/intelligent-meeting-agent/privacy",
-    "termsOfUseUrl": "https://github.com/your-repo/intelligent-meeting-agent/terms"
+    "name": "Capgemini",
+    "websiteUrl": "https://www.capgemini.com",
+    "privacyUrl": "https://www.capgemini.com/privacy-policy",
+    "termsOfUseUrl": "https://www.capgemini.com/terms-of-use"
   },
   "name": {
-    "short": "Meeting Agent",
-    "full": "Intelligent Multilingual Meeting Agent"
+    "short": "MeetingAgent",
+    "full": "Intelligent Meeting Agent"
   },
   "description": {
-    "short": "AI meeting transcription and analysis bot",
-    "full": "An intelligent bot that joins Teams meetings to provide real-time multilingual transcription, speaker identification, and AI-powered analysis reports. Supports 10+ languages including Arabic, French, and English."
+    "short": "AI meeting transcription bot",
+    "full": "Joins Teams meetings to provide real-time multilingual transcription, speaker identification, and AI-powered analysis reports."
   },
   "icons": {
     "color": "color.png",
@@ -35,7 +36,9 @@
       "commandLists": [
         {
           "scopes": [
-            "personal"
+            "personal",
+            "team",
+            "groupChat"
           ],
           "commands": [
             {
@@ -55,7 +58,13 @@
     "identity",
     "messageTeamMembers"
   ],
-  "validDomains": [],
+  "validDomains": [
+    "closes-letters-appointment-trying.trycloudflare.com"
+  ],
+  "webApplicationInfo": {
+    "id": "fec00466-c8a1-453d-9bc5-033b9212771b",
+    "resource": "https://closes-letters-appointment-trying.trycloudflare.com"
+  },
   "authorization": {
     "permissions": {
       "resourceSpecific": [
@@ -65,6 +74,10 @@
         },
         {
           "name": "OnlineMeetingTranscription.Read.Chat",
+          "type": "Application"
+        },
+        {
+          "name": "ChannelMeeting.ReadBasic.Group",
           "type": "Application"
         },
         {
